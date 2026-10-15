@@ -240,9 +240,18 @@ func _build_toolbar() -> void:
 	bar.offset_left = -12
 	bar.offset_right = -12
 	bar.offset_top = 6
-	var small := _box(Color(0.1, 0.06, 0.04, 0.75), EDGE, 6, 6)
-	small.content_margin_top = 2
-	small.content_margin_bottom = 2
+	# Same margins in every state so the buttons never change size on hover.
+	var states := {
+		"normal": _box(Color(0.1, 0.06, 0.04, 0.75), EDGE, 6, 6),
+		"hover": _box(Color(0.22, 0.14, 0.09, 0.9), GOLD.darkened(0.4), 6, 6),
+		"pressed": _box(Color(0.06, 0.04, 0.03, 0.9), GOLD.darkened(0.4), 6, 6),
+		"hover_pressed": _box(Color(0.06, 0.04, 0.03, 0.9), GOLD.darkened(0.4), 6, 6),
+		"disabled": _box(Color(0.1, 0.06, 0.04, 0.5), EDGE, 6, 6),
+		"focus": StyleBoxEmpty.new(),
+	}
+	for box in states.values():
+		box.content_margin_top = 2
+		box.content_margin_bottom = 2
 	var specs := [
 		["A-", "Smaller text  (Cmd -)", func() -> void: _set_text_scale(text_scale - 0.1)],
 		["A+", "Larger text  (Cmd +)", func() -> void: _set_text_scale(text_scale + 0.1)],
@@ -254,7 +263,10 @@ func _build_toolbar() -> void:
 		b.tooltip_text = spec[1]
 		b.focus_mode = Control.FOCUS_NONE
 		b.add_theme_font_size_override("font_size", 13)
-		b.add_theme_stylebox_override("normal", small)
+		for state in states:
+			b.add_theme_stylebox_override(state, states[state])
+		for col in ["font_color", "font_hover_color", "font_pressed_color", "font_hover_pressed_color", "font_focus_color"]:
+			b.add_theme_color_override(col, GOLD if col.contains("hover") else TEXT)
 		b.pressed.connect(spec[2])
 		bar.add_child(b)
 		if spec[0] == "Full screen":
@@ -271,7 +283,8 @@ func _setup_window() -> void:
 	win.min_size = Vector2i(Vector2(720, 520) * dpi)
 	var saved_size: Vector2i = cfg.get_value("window", "size", Vector2i.ZERO)
 	var saved_pos: Vector2i = cfg.get_value("window", "position", Vector2i.ZERO)
-	if saved_size.x > 0 and _on_some_screen(saved_pos):
+	var testing := args.has("screenshot")
+	if saved_size.x > 0 and _on_some_screen(saved_pos) and not testing:
 		win.size = saved_size
 		win.position = saved_pos
 	else:
@@ -279,7 +292,7 @@ func _setup_window() -> void:
 		var w := mini(int(usable.size.x * 0.75), int(h * 1.6))
 		win.size = Vector2i(w, h)
 		win.position = usable.position + (usable.size - win.size) / 2
-	if cfg.get_value("window", "fullscreen", false):
+	if cfg.get_value("window", "fullscreen", false) and not testing:
 		_set_fullscreen(true)
 	_window_state = _describe_window()
 
@@ -330,7 +343,7 @@ func _track_window() -> void:
 
 
 func _set_text_scale(value: float) -> void:
-	text_scale = clampf(snappedf(value, 0.05), 0.7, 2.5)
+	text_scale = clampf(snappedf(value, 0.05), 0.4, 2.5)
 	if not args.has("screenshot"):
 		cfg.set_value("ui", "text_scale", text_scale)
 		cfg.save(CFG_PATH)
