@@ -1,0 +1,4 @@
+node_modules/
+client/.godot/
+*.translation
+.DS_Store

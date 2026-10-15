@@ -1,0 +1,28 @@
+; Engine configuration file.
+
+config_version=5
+
+[application]
+
+config/name="MCP Tavern"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.7")
+config/icon="res://icon.svg"
+run/max_fps=30
+
+[display]
+
+window/size/viewport_width=1280
+window/size/viewport_height=860
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
+
+[gui]
+
+timers/tooltip_delay_sec=0.35
+
+[rendering]
+
+renderer/rendering_method="mobile"
+renderer/rendering_method.mobile="mobile"
+anti_aliasing/quality/msaa_2d=2
