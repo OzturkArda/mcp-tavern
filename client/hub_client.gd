@@ -9,6 +9,7 @@ signal member_updated(member: Dictionary)
 signal member_left(id: String)
 signal claims_changed(claims: Array)
 signal join_failed(reason: String)
+signal token_changed(token: String)
 
 var base_url := "http://127.0.0.1:4777"
 var token := ""
@@ -38,6 +39,7 @@ func join(member_name: String, resume_token: String = "") -> void:
 			token = res["token"]
 			me = res["member"]
 			_joining = false
+			token_changed.emit(token)
 			_open_socket()
 			return
 		if int(res["status"]) == 0:

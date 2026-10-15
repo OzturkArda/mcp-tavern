@@ -14,7 +14,6 @@ const TEXT := Color("eadfc8")
 const DIM := Color("8f7f68")
 const GOLD := Color("f2c94c")
 const BASE_FONT := 15
-const MAX_CHAT_WIDTH := 1100.0
 
 var hub: HubClient
 var tavern: TavernView
@@ -32,7 +31,6 @@ var name_layer: Control
 var name_edit: LineEdit
 var name_error: Label
 var file_dialog: FileDialog
-var chat_margin: MarginContainer
 var fullscreen_btn: Button
 
 var messages: Array = []
@@ -67,7 +65,6 @@ func _ready() -> void:
 	_build_ui()
 	_setup_window()
 	_apply_text_scale()
-	resized.connect(_fit_chat_width)
 	hub = HubClient.new()
 	add_child(hub)
 	if args.has("hub"):
@@ -79,6 +76,7 @@ func _ready() -> void:
 	hub.member_left.connect(_on_left)
 	hub.join_failed.connect(_on_join_failed)
 	hub.claims_changed.connect(func(list: Array) -> void: tavern.set_claims(list))
+	hub.token_changed.connect(_save_token)
 	get_window().files_dropped.connect(_on_files_dropped)
 	var saved := String(args.get("name", cfg.get_value("user", "name", "")))
 	if saved != "":
@@ -161,7 +159,6 @@ func _build_ui() -> void:
 	chat.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	root.add_child(chat)
 	var margin := MarginContainer.new()
-	chat_margin = margin
 	for side in ["left", "right"]:
 		margin.add_theme_constant_override("margin_" + side, 16)
 	margin.add_theme_constant_override("margin_top", 10)
@@ -346,21 +343,11 @@ func _apply_text_scale() -> void:
 	log_view.add_theme_font_size_override("mono_font_size", roundi(14 * text_scale))
 	input.custom_minimum_size.y = roundi(46 * text_scale)
 	HeroNode.text_scale = text_scale
-	_fit_chat_width()
 	log_dirty = true
 
 
 func _fs(base: int) -> int:
 	return roundi(base * text_scale)
-
-
-## Keeps chat lines a readable length on wide windows.
-func _fit_chat_width() -> void:
-	if not chat_margin:
-		return
-	var side := maxi(16, int((size.x - MAX_CHAT_WIDTH * text_scale) / 2.0))
-	chat_margin.add_theme_constant_override("margin_left", side)
-	chat_margin.add_theme_constant_override("margin_right", side)
 
 
 func _input(e: InputEvent) -> void:
@@ -479,9 +466,14 @@ func _submit_name() -> void:
 func _join(n: String) -> void:
 	status_label.text = "Connecting as %s..." % n
 	await hub.join(n, String(cfg.get_value("user", "token", "")))
-	if hub.token != "" and not args.has("screenshot"):
-		cfg.set_value("user", "token", hub.token)
-		cfg.save(CFG_PATH)
+
+
+## Every (re)join gets a token; saving it lets a relaunch resume the same seat.
+func _save_token(token: String) -> void:
+	if args.has("screenshot"):
+		return
+	cfg.set_value("user", "token", token)
+	cfg.save(CFG_PATH)
 
 
 func _on_join_failed(reason: String) -> void:
