@@ -112,6 +112,15 @@ func remove_member(id: String) -> void:
 	_layout()
 
 
+func set_claims(list: Array) -> void:
+	for id in heroes:
+		var held: Array = []
+		for c in list:
+			if c.get("holderId") == id:
+				held.append(String(c.get("resource", "")))
+		heroes[id].claims = held
+
+
 func touch_member(id: String, at_ms: float) -> void:
 	if heroes.has(id):
 		heroes[id].member["lastActive"] = at_ms
@@ -240,6 +249,8 @@ func _get_tooltip(at: Vector2) -> String:
 	var lines := ["%s  (%s)" % [m.get("name", ""), who]]
 	if String(m.get("status", "")) != "":
 		lines.append(String(m["status"]))
+	if not h.claims.is_empty():
+		lines.append("holds: " + ", ".join(h.claims))
 	var idle := int((Time.get_unix_time_from_system() * 1000.0 - float(m.get("lastActive", 0))) / 60000.0)
 	lines.append("active just now" if idle < 1 else "last active %d min ago" % idle)
 	lines.append("click: @mention   right-click: change look")

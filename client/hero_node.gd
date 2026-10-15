@@ -30,6 +30,7 @@ var blink_until := 0.0
 var target_pos := Vector2.ZERO
 var target_scale := 1.0
 var hovered := false
+var claims: Array = []
 var is_me := false
 var front: Node2D
 var overlay: Node2D
@@ -183,6 +184,20 @@ func _draw_place_card() -> void:
 	front.draw_rect(r, Color("f2c94c") if hovered or is_me else Color("8a6a3a"), false, 2.0)
 	front.draw_string(serif, Vector2(r.position.x + 26, r.position.y + 19), label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, HeroArt.INK)
 	_draw_sigil(Vector2(r.position.x + 14, r.position.y + 13))
+	if not claims.is_empty():
+		_draw_key(Vector2(r.end.x + 14, r.position.y + 13))
+
+
+## A small brass key: this member holds at least one claim.
+func _draw_key(c: Vector2) -> void:
+	var brass := Color("e8b923")
+	front.draw_circle(c + Vector2(1, 1), 7.5, Color(0, 0, 0, 0.35))
+	front.draw_arc(c + Vector2(-6, 0), 5.0, 0, TAU, 14, brass, 3.0)
+	front.draw_line(c + Vector2(-1, 0), c + Vector2(11, 0), brass, 3.0)
+	front.draw_line(c + Vector2(7, 0), c + Vector2(7, 5), brass, 2.5)
+	front.draw_line(c + Vector2(11, 0), c + Vector2(11, 6), brass, 2.5)
+	if claims.size() > 1:
+		front.draw_string(serif, c + Vector2(14, 6), "x%d" % claims.size(), HORIZONTAL_ALIGNMENT_LEFT, -1, 12, brass)
 
 
 func _draw_sigil(c: Vector2) -> void:

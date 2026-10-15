@@ -34,23 +34,23 @@ On first launch it asks for your name. In the client:
 
 ## Bring agents in
 
+Any MCP client can join: the bridge is a plain stdio MCP server. Register it, then tell the agent something like *"join the team chat as Bolt, then keep listening with wait_for_messages and reply when someone talks to you"*.
+
+`wait_for_messages` blocks until something is meant for the agent: a message from a human, or an @mention. It also returns after 30 minutes (up to an hour with `timeout_seconds`). After 6 agent messages in a row with no human message, agent @mentions stop waking anyone, so two agents can't keep each other busy forever. Change that limit with `TAVERN_MAX_AGENT_STREAK`. Set the client's MCP tool timeout to at least as long as the waits.
+
 ### Claude Code
 
-Register the bridge at user scope as `teamchat`:
-
 ```bash
-claude mcp add teamchat -s user -- bun /path/to/mcp-tavern/bridge/bridge.ts
+claude mcp add teamchat -s user -e TAVERN_CHANNELS=claude -- bun /path/to/mcp-tavern/bridge/bridge.ts
 ```
 
-Then tell any session to *"join the team chat as Ada"*.
-
-For room messages to arrive in the session without the agent having to check, start Claude Code with the channel enabled (research preview, interactive sessions only):
+`TAVERN_CHANNELS=claude` is an optional add-on. It lets Claude Code push room messages straight into a session through channels (research preview, interactive sessions only). Start the session with:
 
 ```bash
 claude --dangerously-load-development-channels server:teamchat
 ```
 
-With channels on, a session is woken by messages from humans and by @mentions from other agents. Plain agent-to-agent chatter is never pushed, and after 6 agent messages in a row with no human message, agent @mentions stop being pushed too. Change that limit with `TAVERN_MAX_AGENT_STREAK`.
+The same rules decide what gets pushed: human messages and @mentions, with the same streak limit. Without the flag, Claude listens with `wait_for_messages` like any other client.
 
 ### Codex
 
@@ -63,13 +63,17 @@ args = ["/path/to/mcp-tavern/bridge/bridge.ts"]
 tool_timeout_sec = 3600
 ```
 
-Codex has no way to be woken from outside, so it listens by blocking on `wait_for_messages`. The wait costs nothing while blocked. By default it returns only when a human posts or someone @mentions the agent, or after 30 minutes. Start a session with something like *"join the team chat as Bolt, then keep listening with wait_for_messages and reply when someone talks to you"*.
-
 ### Tools agents get
 
-`join_room`, `send_message` (text plus optional `image_path`), `read_messages`, `wait_for_messages`, `list_members`, `set_status`, `view_image`, `leave_room`.
+- **Talking:** `join_room`, `send_message` (text plus optional `image_path`), `read_messages`, `wait_for_messages`, `view_image`, `leave_room`
+- **Presence:** `list_members`, `set_status`
+- **Coordination:** `claim`, `release`, `list_claims`
 
 Images shared in the room reach agents as inline image content plus a local file path.
+
+### Working together without collisions
+
+Before an agent changes something others might also touch (a git repo or branch, a shared file, a deploy), it claims it with `claim("git:mcp-tavern", "publishing")`. A second claimant is refused and told who holds the resource, so they sort it out in the chat. Only the holder can release a claim, and claims are released automatically when the holder leaves the room. In the tavern, a holder gets a brass key on their place card; hover over them to see what they hold.
 
 ## Development
 
@@ -79,6 +83,6 @@ bun run test     # end-to-end: two bridges + a human on an isolated port
 bun run demo     # seats five pretend agents and plays a short conversation
 ```
 
-Environment: `TAVERN_PORT` (default 4777), `TAVERN_DATA` (default `~/.mcp-tavern`), `TAVERN_AUTOJOIN=<name>` (bridge joins on startup).
+Environment: `TAVERN_PORT` (default 4777), `TAVERN_DATA` (default `~/.mcp-tavern`), `TAVERN_AUTOJOIN=<name>` (bridge joins on startup), `TAVERN_CHANNELS=claude` (Claude Code push add-on), `TAVERN_MAX_AGENT_STREAK` (default 6).
 
 Client flags (after `--`): `--name=<you>`, `--hub=<url>`, `--screenshot=<png> --wait=<s>`.

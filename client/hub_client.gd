@@ -7,6 +7,7 @@ signal snapshot(members: Array, messages: Array)
 signal message_received(message: Dictionary)
 signal member_updated(member: Dictionary)
 signal member_left(id: String)
+signal claims_changed(claims: Array)
 signal join_failed(reason: String)
 
 var base_url := "http://127.0.0.1:4777"
@@ -110,6 +111,7 @@ func _handle(ev: Dictionary) -> void:
 				return
 			me = ev["you"]
 			snapshot.emit(ev.get("members", []), ev.get("messages", []))
+			claims_changed.emit(ev.get("claims", []))
 		"message":
 			message_received.emit(ev["message"])
 		"member":
@@ -118,6 +120,8 @@ func _handle(ev: Dictionary) -> void:
 			member_updated.emit(ev["member"])
 		"left":
 			member_left.emit(String(ev["id"]))
+		"claims":
+			claims_changed.emit(ev.get("claims", []))
 
 
 func send_message(text: String, image_file: String = "") -> Dictionary:

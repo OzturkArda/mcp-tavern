@@ -51,7 +51,7 @@ interface Message {
   id: number;
   ts: string;
   kind: "chat" | "system";
-  event?: "join" | "leave";
+  event?: "join" | "leave" | "claim" | "release";
   from: PublicMember | null;
   text: string;
   image?: ImageRef;
@@ -61,11 +61,22 @@ interface Message {
 
 type PublicMember = Omit<Member, "token">;
 
+// A claim says "I'm working on this shared thing" (a repo, a file, a deploy)
+// so members don't step on each other. Released explicitly or when the holder leaves.
+interface Claim {
+  resource: string;
+  holderId: string;
+  holder: string;
+  note: string;
+  since: number;
+}
+
 const members = new Map<string, Member>(); // by token
 const sockets = new Map<string, Set<unknown>>(); // token -> open sockets
 let messages: Message[] = [];
 let nextId = 1;
 let agentStreak = 0;
+const claims = new Map<string, Claim>(); // by lowercased resource
 
 const looks: Record<string, string> = existsSync(LOOKS)
   ? JSON.parse(readFileSync(LOOKS, "utf8"))
@@ -149,6 +160,18 @@ function removeMember(m: Member, reason: string) {
   sockets.delete(m.token);
   broadcast({ type: "left", id: m.id });
   record({ kind: "system", event: "leave", from: pub(m), text: `${m.name} ${reason}`, mentions: [] });
+  for (const c of [...claims.values()]) if (c.holderId === m.id) dropClaim(c, pub(m), "left the room");
+}
+
+function claimList(): Claim[] {
+  return [...claims.values()].sort((a, b) => a.since - b.since);
+}
+
+function dropClaim(c: Claim, by: PublicMember, why?: string) {
+  claims.delete(c.resource.toLowerCase());
+  broadcast({ type: "claims", claims: claimList() });
+  const text = why ? `${c.holder}'s claim on "${c.resource}" was released (${why})` : `${by.name} released "${c.resource}"`;
+  record({ kind: "system", event: "release", from: by, text, mentions: [] });
 }
 
 // Activity is broadcast at most once a minute so clients can tell who's idle.
@@ -233,17 +256,24 @@ async function handle(req: Request, url: URL): Promise<Response> {
     return json({ token: m.token, member: pub(m) });
   }
 
+  if (req.method === "GET" && path === "/api/claims") {
+    return json({ claims: claimList() });
+  }
+
   if (req.method === "GET" && path === "/api/members") {
     return json({ members: [...members.values()].map(pub) });
   }
 
   if (req.method === "GET" && path === "/api/messages") {
+    // Oldest-first pages after `after` (check `more`), or the newest `limit` with recent=1.
     const after = Number(url.searchParams.get("after") ?? 0);
     const limit = Math.min(Number(url.searchParams.get("limit") ?? 100), 500);
+    const recent = url.searchParams.get("recent") === "1";
     const me = auth(req);
     if (me) touch(me);
     const list = messages.filter((m) => m.id > after);
-    return json({ messages: list.slice(-limit), latest: nextId - 1 });
+    const page = recent ? list.slice(-limit) : list.slice(0, limit);
+    return json({ messages: page, latest: nextId - 1, more: !recent && list.length > limit });
   }
 
   if (req.method === "GET" && path.startsWith("/images/")) {
@@ -311,6 +341,34 @@ async function handle(req: Request, url: URL): Promise<Response> {
     return json({ member: pub(target) });
   }
 
+  if (req.method === "POST" && path === "/api/claims") {
+    const body = (await req.json().catch(() => ({}))) as { resource?: string; note?: string };
+    const resource = (body.resource ?? "").trim().slice(0, 80);
+    if (!resource) return err(400, "resource is required");
+    const note = (body.note ?? "").trim().slice(0, 120);
+    const held = claims.get(resource.toLowerCase());
+    if (held && held.holderId !== me.id) {
+      return json({ error: `"${held.resource}" is claimed by ${held.holder}${held.note ? ` (${held.note})` : ""}`, claim: held }, 409);
+    }
+    const c: Claim = { resource: held?.resource ?? resource, holderId: me.id, holder: me.name, note, since: held?.since ?? Date.now() };
+    claims.set(resource.toLowerCase(), c);
+    touch(me);
+    broadcast({ type: "claims", claims: claimList() });
+    if (!held) {
+      record({ kind: "system", event: "claim", from: pub(me), text: `${me.name} claimed "${c.resource}"${note ? `: ${note}` : ""}`, mentions: [] });
+    }
+    return json({ claim: c, renewed: !!held });
+  }
+
+  if (req.method === "POST" && path === "/api/claims/release") {
+    const body = (await req.json().catch(() => ({}))) as { resource?: string };
+    const held = claims.get((body.resource ?? "").trim().toLowerCase());
+    if (!held) return err(404, `nothing called "${body.resource}" is claimed`);
+    if (held.holderId !== me.id) return err(403, `"${held.resource}" is claimed by ${held.holder}, not you`);
+    dropClaim(held, pub(me));
+    return json({ ok: true });
+  }
+
   if (req.method === "POST" && path === "/api/leave") {
     removeMember(me, "left the room");
     return json({ ok: true });
@@ -355,6 +413,7 @@ const server = Bun.serve({
         members: [...members.values()].map(pub),
         messages: messages.slice(-200),
         looks: LOOKS_POOL,
+        claims: claimList(),
       }));
     },
     message(ws, raw) {

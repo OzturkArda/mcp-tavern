@@ -78,6 +78,7 @@ func _ready() -> void:
 	hub.member_updated.connect(_on_member)
 	hub.member_left.connect(_on_left)
 	hub.join_failed.connect(_on_join_failed)
+	hub.claims_changed.connect(func(list: Array) -> void: tavern.set_claims(list))
 	get_window().files_dropped.connect(_on_files_dropped)
 	var saved := String(args.get("name", cfg.get_value("user", "name", "")))
 	if saved != "":
@@ -591,7 +592,14 @@ func _append(m: Dictionary) -> void:
 	var from = m.get("from")
 	if m.get("kind") == "system":
 		var who := _esc(String(from["name"])) if typeof(from) == TYPE_DICTIONARY else "someone"
-		var line := ("%s pulls up a chair" if m.get("event") == "join" else "%s heads out into the night") % who
+		var line := ""
+		match String(m.get("event", "")):
+			"join":
+				line = "%s pulls up a chair" % who
+			"leave":
+				line = "%s heads out into the night" % who
+			_:
+				line = _esc(String(m.get("text", ""))).replace(" claimed ", " takes the key to ").replace(" released ", " hands back the key to ")
 		log_view.append_text("[center][color=#7d6d57][i]~ %s ~[/i][/color][/center]\n" % line)
 		_last_from = ""
 		return
