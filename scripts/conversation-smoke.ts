@@ -89,7 +89,20 @@ try {
   check("@all selects every agent", all.floor.join() === "Alpha,Beta");
   await call(a, "send_message", { text: "Alpha opinion" });
   check("@all keeps the other responder's turn", (await get("/api/conversation")).conversation.floor.join() === "Beta");
+  await call(a, "read_messages");
+  await call(b, "read_messages");
+  let alphaWoke = false;
+  const alphaQuiet = call(a, "wait_for_messages", { timeout_seconds: 1 }).then(r => { alphaWoke = true; return r; });
+  const betaFollowup = call(b, "wait_for_messages", { timeout_seconds: 3 });
+  const nudge = await prompt("?", human.token);
+  const followupRead = textOf(await betaFollowup);
+  c = (await get("/api/conversation")).conversation;
+  check("unaddressed follow-up preserves unfinished @all", nudge.replyTo === all.id && c.messageId === all.id && c.floor.join() === "Beta" && c.replied.includes("Alpha"));
+  check("remaining responder receives follow-up with original prompt", followupRead.includes("[follow-up to #"+all.id+"]") && c.received.includes("Beta"));
+  await Bun.sleep(150);
+  check("already-replied agent is not woken by the follow-up", !alphaWoke);
   await call(b, "send_message", { text: "Beta opinion" });
+  await alphaQuiet;
   check("@all completes after both reply", (await get("/api/conversation")).conversation.status === "complete");
 
   const timeout = await prompt("A timeout question", human.token);

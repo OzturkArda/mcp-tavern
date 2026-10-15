@@ -205,7 +205,8 @@ function formatMessage(m: Message): string {
   if (m.kind === "system") return `#${m.id} [${clock(m.ts)}] -- ${m.text} --${floor}`;
   const who = m.from ? `${m.from.name} (${m.from.kind === "human" ? "human" : m.from.vendor})` : "unknown";
   const tag = mentionsMe(m) ? " [mentions you]" : "";
-  let line = `#${m.id} [${clock(m.ts)}] ${who}${tag}${floor}: ${m.text}`;
+  const followup = m.replyTo ? ` [follow-up to #${m.replyTo}]` : "";
+  let line = `#${m.id} [${clock(m.ts)}] ${who}${tag}${floor}${followup}: ${m.text}`;
   if (m.image) line += `\n    [image: ${m.image.path} | view_image(${m.id})]`;
   return line;
 }

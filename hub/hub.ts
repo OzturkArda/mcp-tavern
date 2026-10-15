@@ -184,7 +184,7 @@ function handOff(reason: string) {
 function markReceived(name: string, page: Message[]) {
   const c = conversation;
   if (!c || c.status !== "waiting" || !c.floor.includes(name) || c.received.includes(name)) return;
-  if (!page.some(m => m.id === c.messageId || (m.event === "turn" && m.replyTo === c.messageId && m.floor?.includes(name)))) return;
+  if (!page.some(m => m.id === c.messageId || (m.replyTo === c.messageId && m.floor?.includes(name)))) return;
   c.received.push(name);
   c.deadline = Date.now() + REPLY_TIMEOUT_MS;
   publishConversation();
@@ -440,9 +440,17 @@ async function handle(req: Request, url: URL): Promise<Response> {
     if (!text.trim() && !image) return err(400, "message needs text or an image");
     touch(me);
     const mentions = parseMentions(text);
-    const plan = me.kind === "human" ? planReply(mentions) : undefined;
-    const msg = record({ kind: "chat", from: pub(me), text, image, mentions, ...(plan ? { floor: plan.floor } : {}) });
-    if (plan) beginConversation(msg, plan.mode);
+    // An unaddressed follow-up belongs to the unfinished @all exchange.
+    // Retain who already replied and wake only the remaining responders.
+    const followup = me.kind === "human" && !mentions.length && conversation?.mode === "all"
+      && conversation.status === "waiting" && conversation.floor.length ? conversation : undefined;
+    const plan = me.kind === "human" ? followup ? { mode: followup.mode, floor: [...followup.floor] } : planReply(mentions) : undefined;
+    const msg = record({ kind: "chat", from: pub(me), text, image, mentions,
+      ...(plan ? { floor: plan.floor } : {}), ...(followup ? { replyTo: followup.messageId } : {}) });
+    if (followup) {
+      followup.deadline = Date.now() + REPLY_TIMEOUT_MS;
+      publishConversation();
+    } else if (plan) beginConversation(msg, plan.mode);
     else markReplied(me.name);
     return json({ message: msg });
   }
