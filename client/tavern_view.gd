@@ -126,7 +126,52 @@ func touch_member(id: String, at_ms: float) -> void:
 		heroes[id].member["lastActive"] = at_ms
 
 
+## Tracks whose turn it is to answer: a human message names its responders in
+## `floor`; a responder's turn ends when they post.
+func track_turn(msg: Dictionary) -> void:
+	if msg.get("kind", "") != "chat":
+		return
+	var from = msg.get("from")
+	if typeof(from) != TYPE_DICTIONARY:
+		return
+	var at := float(Time.get_unix_time_from_datetime_string(String(msg.get("ts", "")).substr(0, 19)))
+	if from.get("kind") == "human" and msg.get("floor") is Array:
+		for h in heroes.values():
+			h.set_turn("waiting" if msg["floor"].has(h.member.get("name")) else "", at)
+	for h in heroes.values():
+		if h.member.get("id") == from.get("id"):
+			h.set_turn("", at)
+
+
+## Applies the hub's live turn state (see the `conversation` event).
+func set_conversation(conv: Variant) -> void:
+	var now := Time.get_unix_time_from_system()
+	for h in heroes.values():
+		var n: String = h.member.get("name", "")
+		var state := ""
+		if typeof(conv) == TYPE_DICTIONARY:
+			if _lists(conv.get("passed"), n):
+				state = "passed"
+			elif conv.get("status") == "waiting" and _lists(conv.get("floor"), n):
+				if _lists(conv.get("working"), n):
+					state = "working"
+				elif _lists(conv.get("received"), n):
+					state = "seen"
+				else:
+					state = "waiting"
+		h.set_turn(state, now)
+
+
+func _lists(v: Variant, name: String) -> bool:
+	if v is Array:
+		return v.has(name)
+	if v is Dictionary:
+		return v.has(name)
+	return false
+
+
 func on_message(msg: Dictionary) -> void:
+	track_turn(msg)
 	if msg.get("kind", "") != "chat":
 		return
 	var from = msg.get("from")

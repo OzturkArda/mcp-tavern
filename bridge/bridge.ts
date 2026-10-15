@@ -27,6 +27,7 @@ interface ImageRef { file: string; url: string; path: string; mime: string }
 interface Message {
   id: number; ts: string; kind: "chat" | "system"; event?: string;
   from: Member | null; text: string; image?: ImageRef; mentions: string[]; agentStreak: number;
+  floor?: string[]; replyTo?: number;
 }
 
 let token: string | null = null;
@@ -41,10 +42,10 @@ const instructions = `This server connects you to a shared team chat room. The u
 
 - Call join_room with a short name to enter (use the name the user gives you, otherwise something short that identifies you or your task). Nothing is visible to others until you join.
 - Talk the way colleagues do in a work chat: short, plain, direct messages. Share progress, questions, findings, blockers.
-- Reply when someone addresses you (@YourName) or when you have something useful to add. Don't post acknowledgements or thank-yous, and don't reply to every message.
+- The hub assigns the reply to human prompts. Take the lead when the message says [your turn to reply]; room-wide prompts rotate fairly, directed @mentions pick their recipients, and @all invites everyone. If someone else has the reply, let them lead unless you have an important correction. Do not race to answer every prompt or post empty acknowledgements. Use update_turn to mark working or pass if you cannot take your turn.
 - Fetch new messages with read_messages. During longer tasks, call it between steps so you don't miss anything.${CLAUDE_CHANNEL ? `
 - Messages from humans and @mentions of you may also arrive pushed as <channel source="teamchat" ...> events.` : ""}
-- To stay available when you have nothing else to do, call wait_for_messages in a loop: it blocks until a human posts or someone @mentions you, so reply, then wait again. Prefer long timeouts: each return starts new work for you.
+- If your host already has a push adapter or external listener, rely on it instead of also waiting. Otherwise, to stay available call wait_for_messages in a loop: it blocks until a human posts or someone @mentions you, so reply, then wait again. Prefer long timeouts: each return starts new work for you.
 - Shared images come with a local file path you can open, or call view_image with the message id. Attach your own images (screenshots, diagrams) with send_message's image_path.
 - Keep set_status updated with a few words on what you're currently doing.
 - Before you change something others might also touch (a git repo or branch, a shared file, a deploy, a running service), claim it with claim(resource, note) and release it when you're done. If it's already claimed, coordinate with the holder in the chat instead of working around them. list_claims shows what's taken.
@@ -169,14 +170,16 @@ function mentionsMe(m: Message): boolean {
  * @mention from an agent while agents haven't been talking among themselves
  * for too long (so two agents can't keep waking each other). */
 function addressedToMe(m: Message): boolean {
-  if (m.kind !== "chat" || !me || m.from?.id === me.id) return false;
+  if (!me || m.from?.id === me.id) return false;
+  if (m.floor && (m.from?.kind === "human" || m.event === "turn")) return m.floor.includes(myName);
+  if (m.kind !== "chat") return false;
   if (m.from?.kind === "human") return true;
   return mentionsMe(m) && m.agentStreak <= MAX_AGENT_STREAK;
 }
 
 function onLiveMessage(m: Message) {
   if (!me || m.from?.id === me.id) return;
-  if (m.kind === "chat") for (const w of waiters) w(m);
+  if (m.kind === "chat" || m.event === "turn") for (const w of waiters) w(m);
   if (!CLAUDE_CHANNEL || !addressedToMe(m)) return;
   const meta: Record<string, string> = {
     message_id: String(m.id),
@@ -185,7 +188,7 @@ function onLiveMessage(m: Message) {
     mentions_you: String(mentionsMe(m)),
   };
   if (m.image) meta.image_path = m.image.path;
-  const content = m.text + (m.image ? `\n[image attached: ${m.image.path}]` : "");
+  const content = formatMessage(m);
   mcp.server
     .notification({ method: "notifications/claude/channel", params: { content, meta } })
     .catch(() => {});
@@ -198,10 +201,11 @@ function clock(ts: string) {
 }
 
 function formatMessage(m: Message): string {
-  if (m.kind === "system") return `#${m.id} [${clock(m.ts)}] -- ${m.text} --`;
+  const floor = m.floor ? (m.floor.includes(myName) ? " [your turn to reply]" : ` [reply assigned to ${m.floor.join(", ") || "no available agent"}]`) : "";
+  if (m.kind === "system") return `#${m.id} [${clock(m.ts)}] -- ${m.text} --${floor}`;
   const who = m.from ? `${m.from.name} (${m.from.kind === "human" ? "human" : m.from.vendor})` : "unknown";
   const tag = mentionsMe(m) ? " [mentions you]" : "";
-  let line = `#${m.id} [${clock(m.ts)}] ${who}${tag}: ${m.text}`;
+  let line = `#${m.id} [${clock(m.ts)}] ${who}${tag}${floor}: ${m.text}`;
   if (m.image) line += `\n    [image: ${m.image.path} | view_image(${m.id})]`;
   return line;
 }
@@ -220,7 +224,10 @@ async function imageBlock(ref: ImageRef): Promise<Content | null> {
 async function render(list: Message[], header?: string): Promise<{ content: Content[] }> {
   const content: Content[] = [];
   const text = list.map(formatMessage).join("\n");
-  content.push({ type: "text", text: [header, text || "No new messages."].filter(Boolean).join("\n") });
+  const state = token ? await api<{ conversation: { messageId: number; floor: string[]; status: string } | null }>("GET", "/api/conversation").catch(() => ({ conversation: null })) : { conversation: null };
+  const c = state.conversation;
+  const current = c ? `Current human prompt #${c.messageId}: ${c.status}; ${c.floor.includes(myName) ? "your turn to reply" : c.floor.length ? "reply assigned to " + c.floor.join(", ") : "no reply pending"}. Older turn hints above are historical.` : "";
+  content.push({ type: "text", text: [header, text || "No new messages.", current].filter(Boolean).join("\n") });
   const withImages = list.filter((m) => m.image).slice(-MAX_INLINE_IMAGES);
   for (const m of withImages) {
     const block = await imageBlock(m.image!);
@@ -323,7 +330,7 @@ mcp.registerTool(
   "wait_for_messages",
   {
     description:
-      "Block until there's something for you, then return everything new since you last checked. By default it wakes only for messages from a human or ones that @mention you (or @all). Use long timeouts, and call it again after replying to stay available.",
+      "Block until there's something for you, then return everything new since you last checked. By default it wakes for human prompts or handoffs assigned to you, and agent @mentions within the streak limit. Use long timeouts, and call it again after replying to stay available.",
     inputSchema: {
       timeout_seconds: z.number().int().min(1).max(3600).optional().describe("Longest time to wait (default 1800)"),
       wake_on: z.enum(["addressed", "any"]).optional().describe("'addressed' (default): humans and @mentions of you; 'any': any message from someone else"),
@@ -332,23 +339,30 @@ mcp.registerTool(
   async ({ timeout_seconds, wake_on }) => {
     requireJoined();
     const wanted = (m: Message) =>
-      wake_on === "any" ? m.kind === "chat" && m.from?.id !== me?.id : addressedToMe(m);
-    const first = await unread();
-    if (first.some(wanted)) return render(first);
-    await new Promise<void>((done) => {
-      const wake = (m?: Message) => {
-        if (m && !wanted(m)) return;
-        clearTimeout(timer);
-        waiters.delete(wake);
-        done();
-      };
-      const timer = setTimeout(wake, (timeout_seconds ?? 1800) * 1000);
-      waiters.add(wake);
-    });
-    const later = await unread();
-    const all = [...first, ...later];
-    const header = all.some(wanted) ? undefined : "Nothing addressed to you yet; call wait_for_messages again to keep listening.";
-    return render(all, header);
+      wake_on === "any" ? (m.kind === "chat" || m.event === "turn") && m.from?.id !== me?.id : addressedToMe(m);
+    // Subscribe before the history request so a message arriving during it
+    // cannot be missed until the next timeout.
+    let observed = false;
+    let resolveWake: (() => void) | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const wake = (m: Message) => { if (wanted(m)) { observed = true; resolveWake?.(); } };
+    waiters.add(wake);
+    try {
+      const first = await unread();
+      if (first.some(wanted)) return render(first);
+      if (!observed) await new Promise<void>(done => {
+        resolveWake = done;
+        timer = setTimeout(done, (timeout_seconds ?? 1800) * 1000);
+        if (observed) done();
+      });
+      const later = await unread();
+      const all = [...first, ...later];
+      const header = all.some(wanted) ? undefined : "Nothing assigned to you yet; call wait_for_messages again to keep listening.";
+      return render(all, header);
+    } finally {
+      clearTimeout(timer);
+      waiters.delete(wake);
+    }
   },
 );
 
@@ -399,6 +413,30 @@ mcp.registerTool(
     const block = await imageBlock(m.image);
     if (!block) throw new Error(`image file missing: ${m.image.path}`);
     return { content: [{ type: "text" as const, text: formatMessage(m) }, block] };
+  },
+);
+
+mcp.registerTool(
+  "get_conversation",
+  { description: "Read the current human prompt's assigned responders and delivery/reply state.", inputSchema: {} },
+  async () => {
+    requireJoined();
+    return text(JSON.stringify(await api("GET", "/api/conversation")));
+  },
+);
+
+mcp.registerTool(
+  "update_turn",
+  {
+    description: "Mark your assigned reply as working, or pass it to another available responder. Only valid for the current prompt assigned to you.",
+    inputSchema: {
+      message_id: z.number().int().positive().describe("Human prompt message ID"),
+      state: z.enum(["working", "passed"]),
+    },
+  },
+  async ({ message_id, state }) => {
+    requireJoined();
+    return text(JSON.stringify(await api("POST", "/api/conversation/state", { messageId: message_id, state })));
   },
 );
 

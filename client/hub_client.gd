@@ -10,6 +10,8 @@ signal member_left(id: String)
 signal claims_changed(claims: Array)
 signal join_failed(reason: String)
 signal token_changed(token: String)
+## The hub's current turn state (Dictionary) or null when nothing is pending.
+signal conversation_changed(conversation: Variant)
 
 var base_url := "http://127.0.0.1:4777"
 var token := ""
@@ -114,6 +116,8 @@ func _handle(ev: Dictionary) -> void:
 			me = ev["you"]
 			snapshot.emit(ev.get("members", []), ev.get("messages", []))
 			claims_changed.emit(ev.get("claims", []))
+			if ev.has("conversation"):
+				conversation_changed.emit(ev["conversation"])
 		"message":
 			message_received.emit(ev["message"])
 		"member":
@@ -124,6 +128,8 @@ func _handle(ev: Dictionary) -> void:
 			member_left.emit(String(ev["id"]))
 		"claims":
 			claims_changed.emit(ev.get("claims", []))
+		"conversation":
+			conversation_changed.emit(ev.get("conversation"))
 
 
 func send_message(text: String, image_file: String = "") -> Dictionary:

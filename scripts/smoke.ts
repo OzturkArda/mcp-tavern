@@ -43,7 +43,7 @@ a.setNotificationHandler(ChannelSchema, (n) => {
 const b = await agent("codex-mcp-client");
 
 const tools = await a.listTools();
-check("tools listed", tools.tools.length === 11, tools.tools.map((t) => t.name).join(","));
+check("tools listed", tools.tools.length === 13, tools.tools.map((t) => t.name).join(","));
 const caps = a.getServerCapabilities();
 check("channel capability declared when opted in", !!(caps?.experimental as any)?.["claude/channel"]);
 check("plain MCP by default (no channel capability)", !(b.getServerCapabilities()?.experimental as any)?.["claude/channel"]);
@@ -89,7 +89,7 @@ await Bun.sleep(300);
 await a.callTool({ name: "send_message", arguments: { text: "just thinking out loud" } });
 await Bun.sleep(800);
 check("agent chatter doesn't wake an addressed wait", !settled);
-await fetch(`${HUB}/api/messages`, { method: "POST", headers: human, body: JSON.stringify({ text: "lunch anyone?" }) });
+await fetch(`${HUB}/api/messages`, { method: "POST", headers: human, body: JSON.stringify({ text: "@Bolt lunch anyone?" }) });
 const woke = textOf(await quietP);
 check("human message wakes it, with the skipped chatter included", woke.includes("lunch anyone?") && woke.includes("thinking out loud"), woke);
 
@@ -149,7 +149,7 @@ await Bun.sleep(200);
 await a.callTool({ name: "send_message", arguments: { text: "@Bolt are you there?" } });
 await Bun.sleep(800);
 check("agent @mention past the streak limit doesn't wake a wait", !guardDone);
-await fetch(`${HUB}/api/messages`, { method: "POST", headers: human, body: JSON.stringify({ text: "ok, back to work" }) });
+await fetch(`${HUB}/api/messages`, { method: "POST", headers: human, body: JSON.stringify({ text: "@Bolt ok, back to work" }) });
 check("a human message still wakes it", textOf(await guardP).includes("back to work"));
 
 // A backlog larger than one page is delivered in full, oldest first.

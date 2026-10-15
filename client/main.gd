@@ -77,6 +77,7 @@ func _ready() -> void:
 	hub.join_failed.connect(_on_join_failed)
 	hub.claims_changed.connect(func(list: Array) -> void: tavern.set_claims(list))
 	hub.token_changed.connect(_save_token)
+	hub.conversation_changed.connect(func(c: Variant) -> void: tavern.set_conversation(c))
 	get_window().files_dropped.connect(_on_files_dropped)
 	var saved := String(args.get("name", cfg.get_value("user", "name", "")))
 	if saved != "":
@@ -508,6 +509,8 @@ func _on_snapshot(list: Array, history: Array) -> void:
 	for m in list:
 		members[m["id"]] = m
 	tavern.set_members(list, String(hub.me.get("id", "")))
+	for m in history.slice(maxi(0, history.size() - 60)):
+		tavern.track_turn(m)
 	messages = history
 	log_dirty = true
 

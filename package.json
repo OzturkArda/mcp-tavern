@@ -6,7 +6,7 @@
     "client": "godot --path client",
     "hub": "bun hub/hub.ts",
     "demo": "bun scripts/demo.ts",
-    "test": "bun scripts/smoke.ts"
+    "test": "bun scripts/smoke.ts && bun scripts/conversation-smoke.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

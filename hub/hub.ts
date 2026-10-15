@@ -51,7 +51,9 @@ interface Message {
   id: number;
   ts: string;
   kind: "chat" | "system";
-  event?: "join" | "leave" | "claim" | "release";
+  event?: "join" | "leave" | "claim" | "release" | "turn";
+  floor?: string[];
+  replyTo?: number;
   from: PublicMember | null;
   text: string;
   image?: ImageRef;
@@ -77,6 +79,22 @@ let messages: Message[] = [];
 let nextId = 1;
 let agentStreak = 0;
 const claims = new Map<string, Claim>(); // by lowercased resource
+const REPLY_TIMEOUT_MS = Math.max(100, Number(process.env.TAVERN_REPLY_TIMEOUT_MS ?? 30_000));
+interface Conversation {
+  messageId: number;
+  mode: "rotating" | "directed" | "all";
+  floor: string[];
+  received: string[];
+  working: string[];
+  replied: string[];
+  passed: string[];
+  status: "waiting" | "complete" | "unanswered";
+  deadline: number | null;
+}
+let conversation: Conversation | null = null;
+const attempted = new Set<string>();
+const lastAssigned = new Map<string, number>();
+
 
 const looks: Record<string, string> = existsSync(LOOKS)
   ? JSON.parse(readFileSync(LOOKS, "utf8"))
@@ -92,6 +110,105 @@ if (existsSync(LOG)) {
     }
   }
   if (messages.length) nextId = messages[messages.length - 1].id + 1;
+}
+
+
+// The hub owns attention, so stdio MCP, push adapters and HTTP clients agree.
+// Recover rotation history without retaining an in-flight lease across a restart.
+for (const m of messages) if (m.floor && (
+  (m.from?.kind === "human" && !m.mentions.length) || m.event === "turn"
+)) {
+  for (const name of m.floor) lastAssigned.set(name.toLowerCase(), m.id);
+}
+
+function availableAgents(): string[] {
+  return [...members.values()].filter(m => m.kind === "agent")
+    .map(m => m.name).sort((a, b) => a.localeCompare(b));
+}
+
+function nextResponder(excluded = new Set<string>()): string | undefined {
+  return availableAgents().filter(n => !excluded.has(n.toLowerCase()))
+    .sort((a, b) => (lastAssigned.get(a.toLowerCase()) ?? 0) - (lastAssigned.get(b.toLowerCase()) ?? 0)
+      || a.localeCompare(b))[0];
+}
+
+function planReply(mentions: string[]): { mode: Conversation["mode"]; floor: string[] } {
+  const agents = availableAgents();
+  if (mentions.includes("all")) return { mode: "all", floor: agents };
+  const directed = agents.filter(n => mentions.includes(n));
+  if (mentions.length) return { mode: "directed", floor: directed };
+  const next = nextResponder();
+  return { mode: "rotating", floor: next ? [next] : [] };
+}
+
+function publishConversation() {
+  broadcast({ type: "conversation", conversation });
+}
+
+function beginConversation(m: Message, mode: Conversation["mode"]) {
+  attempted.clear();
+  for (const name of m.floor ?? []) {
+    attempted.add(name.toLowerCase());
+    if (mode === "rotating") lastAssigned.set(name.toLowerCase(), m.id);
+  }
+  conversation = {
+    messageId: m.id, mode, floor: [...(m.floor ?? [])],
+    received: [], working: [], replied: [], passed: [],
+    status: m.floor?.length ? "waiting" : "unanswered",
+    deadline: m.floor?.length ? Date.now() + REPLY_TIMEOUT_MS : null,
+  };
+  publishConversation();
+}
+
+function handOff(reason: string) {
+  const c = conversation;
+  if (!c || c.floor.length || c.status === "complete") return;
+  const next = c.mode === "rotating" ? nextResponder(attempted) : undefined;
+  if (next) {
+    c.floor = [next];
+    c.status = "waiting";
+    c.deadline = Date.now() + REPLY_TIMEOUT_MS;
+    attempted.add(next.toLowerCase());
+    // A persisted event also reaches polling clients and reconnecting adapters.
+    const handoff = record({ kind: "system", event: "turn", from: null, mentions: [],
+      replyTo: c.messageId, floor: [next],
+      text: `${next} has the reply to prompt #${c.messageId} (${reason})` });
+    lastAssigned.set(next.toLowerCase(), handoff.id);
+  } else {
+    c.status = c.replied.length ? "complete" : "unanswered";
+    c.deadline = null;
+  }
+  publishConversation();
+}
+
+function markReceived(name: string, page: Message[]) {
+  const c = conversation;
+  if (!c || c.status !== "waiting" || !c.floor.includes(name) || c.received.includes(name)) return;
+  if (!page.some(m => m.id === c.messageId || (m.event === "turn" && m.replyTo === c.messageId && m.floor?.includes(name)))) return;
+  c.received.push(name);
+  c.deadline = Date.now() + REPLY_TIMEOUT_MS;
+  publishConversation();
+}
+
+function markReplied(name: string) {
+  const c = conversation;
+  if (!c || c.status !== "waiting" || !c.floor.includes(name)) return;
+  c.floor = c.floor.filter(n => n !== name);
+  c.working = c.working.filter(n => n !== name);
+  if (!c.received.includes(name)) c.received.push(name);
+  if (!c.replied.includes(name)) c.replied.push(name);
+  if (!c.floor.length) { c.status = "complete"; c.deadline = null; }
+  publishConversation();
+}
+
+function passResponder(name: string, reason: string) {
+  const c = conversation;
+  if (!c || !c.floor.includes(name)) return;
+  c.floor = c.floor.filter(n => n !== name);
+  c.working = c.working.filter(n => n !== name);
+  if (!c.passed.includes(name)) c.passed.push(name);
+  if (!c.floor.length) handOff(reason);
+  else publishConversation();
 }
 
 function vendorOf(client: string): string {
@@ -161,6 +278,7 @@ function removeMember(m: Member, reason: string) {
   broadcast({ type: "left", id: m.id });
   record({ kind: "system", event: "leave", from: pub(m), text: `${m.name} ${reason}`, mentions: [] });
   for (const c of [...claims.values()]) if (c.holderId === m.id) dropClaim(c, pub(m), "left the room");
+  passResponder(m.name, "previous responder left");
 }
 
 function claimList(): Claim[] {
@@ -253,8 +371,11 @@ async function handle(req: Request, url: URL): Promise<Response> {
     members.set(m.token, m);
     broadcast({ type: "member", member: pub(m) });
     record({ kind: "system", event: "join", from: pub(m), text: `${m.name} joined the room`, mentions: [] });
+    if (m.kind === "agent" && conversation?.status === "unanswered") handOff("responder became available");
     return json({ token: m.token, member: pub(m) });
   }
+
+  if (req.method === "GET" && path === "/api/conversation") return json({ conversation });
 
   if (req.method === "GET" && path === "/api/claims") {
     return json({ claims: claimList() });
@@ -273,6 +394,7 @@ async function handle(req: Request, url: URL): Promise<Response> {
     if (me) touch(me);
     const list = messages.filter((m) => m.id > after);
     const page = recent ? list.slice(-limit) : list.slice(0, limit);
+    if (me) markReceived(me.name, page);
     return json({ messages: page, latest: nextId - 1, more: !recent && list.length > limit });
   }
 
@@ -317,8 +439,28 @@ async function handle(req: Request, url: URL): Promise<Response> {
     }
     if (!text.trim() && !image) return err(400, "message needs text or an image");
     touch(me);
-    const msg = record({ kind: "chat", from: pub(me), text, image, mentions: parseMentions(text) });
+    const mentions = parseMentions(text);
+    const plan = me.kind === "human" ? planReply(mentions) : undefined;
+    const msg = record({ kind: "chat", from: pub(me), text, image, mentions, ...(plan ? { floor: plan.floor } : {}) });
+    if (plan) beginConversation(msg, plan.mode);
+    else markReplied(me.name);
     return json({ message: msg });
+  }
+
+  if (req.method === "POST" && path === "/api/conversation/state") {
+    const body = await req.json().catch(() => ({})) as { messageId?: number; state?: string };
+    if (!conversation || body.messageId !== conversation.messageId) return err(409, "that prompt is no longer current");
+    if (!conversation.floor.includes(me.name)) return err(403, "the current reply is assigned to someone else");
+    if (body.state === "passed") passResponder(me.name, "previous responder passed");
+    else if (body.state === "working") {
+      if (!conversation.received.includes(me.name)) conversation.received.push(me.name);
+      if (!conversation.working.includes(me.name)) {
+        conversation.working.push(me.name);
+        conversation.deadline = Date.now() + REPLY_TIMEOUT_MS;
+      }
+      publishConversation();
+    } else return err(400, "state must be working or passed");
+    return json({ conversation });
   }
 
   if (req.method === "POST" && path === "/api/status") {
@@ -414,6 +556,7 @@ const server = Bun.serve({
         messages: messages.slice(-200),
         looks: LOOKS_POOL,
         claims: claimList(),
+        conversation,
       }));
     },
     message(ws, raw) {
@@ -432,6 +575,13 @@ const server = Bun.serve({
     },
   },
 });
+
+// Leases are short and bounded; a dead harness cannot hold the room forever.
+setInterval(() => {
+  const c = conversation;
+  if (!c || c.status !== "waiting" || !c.deadline || Date.now() < c.deadline) return;
+  for (const name of [...c.floor]) passResponder(name, "previous responder timed out");
+}, Math.min(1000, REPLY_TIMEOUT_MS));
 
 // A member whose sockets have all been closed for longer than the grace period
 // has gone (its agent session ended or the client was closed).

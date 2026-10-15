@@ -31,6 +31,10 @@ var target_pos := Vector2.ZERO
 var target_scale := 1.0
 var hovered := false
 var claims: Array = []
+## Turn state from the hub: "" (not involved), "waiting" (asked, not seen yet),
+## "seen", "working", or "passed". turn_since is when it last changed (unix).
+var turn_state := ""
+var turn_since := 0.0
 var is_me := false
 var front: Node2D
 var overlay: Node2D
@@ -232,6 +236,10 @@ func _draw_overlay() -> void:
 			HeroArt.star(overlay, c, 6.0 * (1.0 - k) + 1.0, Color(1.0, 0.9, 0.5, 1.0 - k))
 	if now < bubble_until and bubble_text != "":
 		_draw_bubble(top + Vector2(0, -10), now)
+	elif has_turn():
+		_draw_thinking(top + Vector2(0, -12))
+	elif turn_state == "passed" and Time.get_unix_time_from_system() - turn_since < 6.0:
+		_draw_pill("passes", top, Color(0.75, 0.72, 0.68))
 	else:
 		var status := String(member.get("status", ""))
 		if status != "" and not leaving:
@@ -248,6 +256,48 @@ func _draw_overlay() -> void:
 			var ph := fmod(t * 0.6 + i * 0.33, 1.0)
 			var zc := Vector2(26 * hs + ph * 26.0, -120 * hs - ph * 34.0)
 			overlay.draw_string(serif, zc, "z", HORIZONTAL_ALIGNMENT_LEFT, -1, int(12 + ph * 10), Color(0.9, 0.9, 1.0, 1.0 - ph))
+
+
+const TURN_TIMEOUT_S := 600.0
+
+
+func set_turn(state: String, at: float) -> void:
+	if state != turn_state:
+		turn_state = state
+		turn_since = at
+
+
+func has_turn() -> bool:
+	return turn_state in ["waiting", "seen", "working"] and Time.get_unix_time_from_system() - turn_since < TURN_TIMEOUT_S
+
+
+func _draw_pill(label: String, top: Vector2, col: Color) -> void:
+	var fs := roundi(13 * text_scale)
+	var tw := font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
+	var ph := fs + 9.0
+	var r := Rect2(Vector2(-tw / 2.0 - 10, top.y - 8 - ph), Vector2(tw + 20, ph))
+	overlay.draw_style_box(pill_box, r)
+	overlay.draw_string(font, Vector2(r.position.x + 10, r.position.y + 4.5 + font.get_ascent(fs)), label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, col)
+
+
+## "It's my turn to answer": a small thought bubble with animated dots.
+func _draw_thinking(anchor: Vector2) -> void:
+	var s := text_scale
+	var r := Rect2(Vector2(-26 * s, anchor.y - 26 * s), Vector2(52 * s, 24 * s))
+	bubble_box.bg_color = BUBBLE_BG
+	bubble_box.border_color = BUBBLE_EDGE
+	bubble_box.shadow_color = Color(0, 0, 0, 0.35)
+	overlay.draw_style_box(bubble_box, r)
+	overlay.draw_circle(Vector2(-6 * s, r.end.y + 5 * s), 3.5 * s, BUBBLE_BG)
+	overlay.draw_circle(Vector2(-2 * s, r.end.y + 11 * s), 2.2 * s, BUBBLE_BG)
+	# waiting: still dots; seen: a slow pulse; working: quick typing dots.
+	var speed := {"waiting": 0.0, "seen": 0.8, "working": 2.6}.get(turn_state, 0.0) as float
+	for i in 3:
+		var a := 0.3
+		if speed > 0.0:
+			var ph := fmod(t * speed - i * 0.25, 1.0)
+			a = 0.35 + 0.65 * (1.0 - absf(ph * 2.0 - 1.0))
+		overlay.draw_circle(r.get_center() + Vector2((i - 1) * 12 * s, 0), 3.6 * s, Color(HeroArt.INK, a))
 
 
 func _draw_bubble(anchor: Vector2, now: float) -> void:
