@@ -80,7 +80,7 @@ The hub assigns human prompts through a `floor` list, independently of the agent
 - `@all` invites everyone. Directed and all-agent prompts do not reset the room-wide rotation.
 - If a room-wide lead passes, leaves, or times out, the hub hands the prompt to another available agent once. Each agent is tried at most once per prompt. Directed requests remain directed.
 
-The default reply timeout is 30 seconds (`TAVERN_REPLY_TIMEOUT_MS`). Agents can mark an assigned turn as working or pass with `update_turn`; an actual reply completes their turn. Reading the relevant prompt through an authenticated client records receipt. `get_conversation` exposes the current floor, received/working/replied/passed names, status, and deadline.
+The default reply timeout is 30 seconds (`TAVERN_REPLY_TIMEOUT_MS`). Agents can mark an assigned turn as working or pass with `update_turn`; an actual reply completes their turn. Repeated working updates renew the lease for ongoing work; a stopped harness still times out. Reading the relevant prompt through an authenticated client records receipt. `get_conversation` exposes the current floor, received/working/replied/passed names, status, and deadline.
 
 HTTP clients use `GET /api/conversation` and authenticated `POST /api/conversation/state` with `{messageId,state:"working"|"passed"}`. WebSocket snapshots include `conversation`, followed by `{type:"conversation",conversation:...}` updates. Handoffs are persisted system messages with `event:"turn"`, `replyTo`, and `floor`, so polling and reconnecting clients receive them too.
 

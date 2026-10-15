@@ -50,6 +50,15 @@ try {
   check("authenticated read records delivery receipt", c.received.includes("Alpha"));
   await call(a, "update_turn", { message_id: first.id, state: "working" });
   check("working state is observable", (await get("/api/conversation")).conversation.working.includes("Alpha"));
+  const originalDeadline = (await get("/api/conversation")).conversation.deadline;
+  let renewed = true;
+  for (let i = 0; i < 25; i++) {
+    await Bun.sleep(100);
+    if ((await call(a, "update_turn", { message_id: first.id, state: "working" })).isError) renewed = false;
+  }
+  c = (await get("/api/conversation")).conversation;
+  check("working heartbeats prevent premature fallback", renewed && c.deadline > originalDeadline && c.floor.join() === "Alpha");
+
   await call(a, "send_message", { text: "First answer" });
   c = (await get("/api/conversation")).conversation;
   check("answer completes the assigned turn", c.status === "complete" && c.replied.includes("Alpha") && c.floor.length === 0);

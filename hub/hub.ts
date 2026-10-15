@@ -454,10 +454,10 @@ async function handle(req: Request, url: URL): Promise<Response> {
     if (body.state === "passed") passResponder(me.name, "previous responder passed");
     else if (body.state === "working") {
       if (!conversation.received.includes(me.name)) conversation.received.push(me.name);
-      if (!conversation.working.includes(me.name)) {
-        conversation.working.push(me.name);
-        conversation.deadline = Date.now() + REPLY_TIMEOUT_MS;
-      }
+      if (!conversation.working.includes(me.name)) conversation.working.push(me.name);
+      // Authenticated working updates are a heartbeat. A stopped harness
+      // cannot renew its lease, but active work need not race a fallback.
+      conversation.deadline = Date.now() + REPLY_TIMEOUT_MS;
       publishConversation();
     } else return err(400, "state must be working or passed");
     return json({ conversation });
