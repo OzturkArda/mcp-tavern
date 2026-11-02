@@ -2,7 +2,7 @@
 // Tavern hub: the single source of truth for the room. Agents reach it through
 // the stdio bridge (bridge/bridge.ts); the Godot client talks to it directly.
 // HTTP for writes, one WebSocket stream for live events.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -51,7 +51,7 @@ interface Message {
   id: number;
   ts: string;
   kind: "chat" | "system";
-  event?: "join" | "leave" | "claim" | "release" | "turn";
+  event?: "join" | "leave" | "claim" | "release" | "turn" | "rename" | "clear";
   floor?: string[];
   replyTo?: number;
   from: PublicMember | null;
@@ -75,6 +75,7 @@ interface Claim {
 
 const members = new Map<string, Member>(); // by token
 const sockets = new Map<string, Set<unknown>>(); // token -> open sockets
+const removed = new Map<string, string>(); // token -> who cleared the room; their seat isn't taken back automatically
 let messages: Message[] = [];
 let nextId = 1;
 let agentStreak = 0;
@@ -82,7 +83,7 @@ const claims = new Map<string, Claim>(); // by lowercased resource
 const REPLY_TIMEOUT_MS = Math.max(100, Number(process.env.TAVERN_REPLY_TIMEOUT_MS ?? 30_000));
 interface Conversation {
   messageId: number;
-  mode: "rotating" | "directed" | "all";
+  mode: "room" | "directed" | "all";
   floor: string[];
   received: string[];
   working: string[];
@@ -93,7 +94,6 @@ interface Conversation {
 }
 let conversation: Conversation | null = null;
 const attempted = new Set<string>();
-const lastAssigned = new Map<string, number>();
 
 
 const looks: Record<string, string> = existsSync(LOOKS)
@@ -114,31 +114,18 @@ if (existsSync(LOG)) {
 
 
 // The hub owns attention, so stdio MCP, push adapters and HTTP clients agree.
-// Recover rotation history without retaining an in-flight lease across a restart.
-for (const m of messages) if (m.floor && (
-  (m.from?.kind === "human" && !m.mentions.length) || m.event === "turn"
-)) {
-  for (const name of m.floor) lastAssigned.set(name.toLowerCase(), m.id);
-}
-
 function availableAgents(): string[] {
   return [...members.values()].filter(m => m.kind === "agent")
     .map(m => m.name).sort((a, b) => a.localeCompare(b));
 }
 
-function nextResponder(excluded = new Set<string>()): string | undefined {
-  return availableAgents().filter(n => !excluded.has(n.toLowerCase()))
-    .sort((a, b) => (lastAssigned.get(a.toLowerCase()) ?? 0) - (lastAssigned.get(b.toLowerCase()) ?? 0)
-      || a.localeCompare(b))[0];
-}
-
+// A room-wide prompt goes to every agent present, and they answer side by side.
 function planReply(mentions: string[]): { mode: Conversation["mode"]; floor: string[] } {
   const agents = availableAgents();
   if (mentions.includes("all")) return { mode: "all", floor: agents };
   const directed = agents.filter(n => mentions.includes(n));
   if (mentions.length) return { mode: "directed", floor: directed };
-  const next = nextResponder();
-  return { mode: "rotating", floor: next ? [next] : [] };
+  return { mode: "room", floor: agents };
 }
 
 function publishConversation() {
@@ -147,10 +134,7 @@ function publishConversation() {
 
 function beginConversation(m: Message, mode: Conversation["mode"]) {
   attempted.clear();
-  for (const name of m.floor ?? []) {
-    attempted.add(name.toLowerCase());
-    if (mode === "rotating") lastAssigned.set(name.toLowerCase(), m.id);
-  }
+  for (const name of m.floor ?? []) attempted.add(name.toLowerCase());
   conversation = {
     messageId: m.id, mode, floor: [...(m.floor ?? [])],
     received: [], working: [], replied: [], passed: [],
@@ -163,17 +147,17 @@ function beginConversation(m: Message, mode: Conversation["mode"]) {
 function handOff(reason: string) {
   const c = conversation;
   if (!c || c.floor.length || c.status === "complete") return;
-  const next = c.mode === "rotating" ? nextResponder(attempted) : undefined;
+  // An agent who wasn't here for a room-wide prompt can take it up.
+  const next = c.mode === "room" ? availableAgents().find(n => !attempted.has(n.toLowerCase())) : undefined;
   if (next) {
     c.floor = [next];
     c.status = "waiting";
     c.deadline = Date.now() + REPLY_TIMEOUT_MS;
     attempted.add(next.toLowerCase());
     // A persisted event also reaches polling clients and reconnecting adapters.
-    const handoff = record({ kind: "system", event: "turn", from: null, mentions: [],
+    record({ kind: "system", event: "turn", from: null, mentions: [],
       replyTo: c.messageId, floor: [next],
       text: `${next} has the reply to prompt #${c.messageId} (${reason})` });
-    lastAssigned.set(next.toLowerCase(), handoff.id);
   } else {
     c.status = c.replied.length ? "complete" : "unanswered";
     c.deadline = null;
@@ -314,6 +298,10 @@ function err(status: number, error: string) {
   return json({ error }, status);
 }
 
+function removedNote(token: string): string {
+  return `${removed.get(token)} cleared the room and sent everyone home. Join again only if you're asked to.`;
+}
+
 function auth(req: Request): Member | undefined {
   const header = req.headers.get("authorization") ?? "";
   const token = header.replace(/^Bearer\s+/i, "");
@@ -343,6 +331,7 @@ async function handle(req: Request, url: URL): Promise<Response> {
     const body = (await req.json().catch(() => ({}))) as {
       name?: string; kind?: Kind; client?: string; resume?: string;
     };
+    if (body.resume && removed.has(body.resume)) return err(410, removedNote(body.resume));
     if (body.resume && members.has(body.resume)) {
       const m = members.get(body.resume)!;
       m.lastSeen = m.lastActive = Date.now();
@@ -408,6 +397,8 @@ async function handle(req: Request, url: URL): Promise<Response> {
 
   // Everything below needs a member token.
   const me = auth(req);
+  const bearer = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
+  if (!me && removed.has(bearer)) return err(410, removedNote(bearer));
   if (!me) return err(401, "unknown or expired token; join the room again");
 
   if (req.method === "POST" && path === "/api/images") {
@@ -519,6 +510,59 @@ async function handle(req: Request, url: URL): Promise<Response> {
     return json({ ok: true });
   }
 
+  if (req.method === "POST" && path === "/api/rename") {
+    if (me.kind !== "human") return err(403, "only people at the table can change their name");
+    const body = (await req.json().catch(() => ({}))) as { name?: string };
+    const name = (body.name ?? "").trim().replace(/\s+/g, "-");
+    if (!/^[A-Za-z0-9_.\-]{1,32}$/.test(name))
+      return err(400, "name must be 1-32 characters: letters, digits, _ . -");
+    const existing = findByName(name);
+    if (existing && existing !== me) return err(409, `the name "${name}" is already taken by someone in the room`);
+    const old = me.name;
+    if (old === name) return json({ member: pub(me) });
+    me.name = name;
+    looks[name.toLowerCase()] = me.look;
+    writeFileSync(LOOKS, JSON.stringify(looks, null, 2));
+    for (const c of claims.values()) if (c.holderId === me.id) c.holder = name;
+    broadcast({ type: "member", member: pub(me) });
+    broadcast({ type: "claims", claims: claimList() });
+    record({ kind: "system", event: "rename", from: pub(me), text: `${old} is now ${name}`, mentions: [] });
+    return json({ member: pub(me) });
+  }
+
+  // Starts a fresh conversation. The old log is kept beside the new one, and
+  // message ids keep counting up so agents' read cursors stay valid.
+  // With `everyone`, the rest of the room is sent home and all claims dropped.
+  if (req.method === "POST" && path === "/api/clear") {
+    if (me.kind !== "human") return err(403, "only people at the table can clear it");
+    const body = (await req.json().catch(() => ({}))) as { everyone?: boolean };
+    if (body.everyone) {
+      for (const m of [...members.values()]) {
+        if (m === me) continue;
+        removed.set(m.token, me.name);
+        for (const socket of sockets.get(m.token) ?? []) {
+          const ws = socket as { send(data: string): void; close(code?: number, reason?: string): void };
+          ws.send(JSON.stringify({ type: "removed", reason: removedNote(m.token) }));
+          ws.close(4001, "removed");
+        }
+        members.delete(m.token);
+        sockets.delete(m.token);
+        broadcast({ type: "left", id: m.id });
+      }
+      claims.clear();
+      broadcast({ type: "claims", claims: claimList() });
+    }
+    if (existsSync(LOG)) renameSync(LOG, join(DATA, `messages-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`));
+    messages = [];
+    agentStreak = 0;
+    conversation = null;
+    attempted.clear();
+    publishConversation();
+    broadcast({ type: "cleared" });
+    record({ kind: "system", event: "clear", from: pub(me), text: `${me.name} cleared the ${body.everyone ? "room" : "table"}`, mentions: [] });
+    return json({ ok: true });
+  }
+
   if (req.method === "POST" && path === "/api/leave") {
     removeMember(me, "left the room");
     return json({ ok: true });
@@ -551,6 +595,11 @@ const server = Bun.serve({
     open(ws) {
       const { token } = ws.data as SocketData;
       ws.subscribe("room");
+      if (token && removed.has(token)) {
+        ws.send(JSON.stringify({ type: "removed", reason: removedNote(token) }));
+        ws.close(4001, "removed");
+        return;
+      }
       const me = token ? members.get(token) : undefined;
       if (me && token) {
         me.lastSeen = Date.now();

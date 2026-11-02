@@ -15,6 +15,8 @@ const DIM := Color("8f7f68")
 const GOLD := Color("f2c94c")
 const BASE_FONT := 15
 
+enum MenuItem { RENAME, NEW_CONVERSATION, CLEAR_ROOM, SMALLER, LARGER, FULL_SCREEN }
+
 var hub: HubClient
 var tavern: TavernView
 var log_view: RichTextLabel
@@ -31,7 +33,8 @@ var name_layer: Control
 var name_edit: LineEdit
 var name_error: Label
 var file_dialog: FileDialog
-var fullscreen_btn: Button
+var menu: PopupMenu
+var confirm_dialog: ConfirmationDialog
 
 var messages: Array = []
 var members := {}
@@ -78,6 +81,7 @@ func _ready() -> void:
 	hub.claims_changed.connect(func(list: Array) -> void: tavern.set_claims(list))
 	hub.token_changed.connect(_save_token)
 	hub.conversation_changed.connect(func(c: Variant) -> void: tavern.set_conversation(c))
+	hub.cleared.connect(_on_cleared)
 	get_window().files_dropped.connect(_on_files_dropped)
 	var saved := String(args.get("name", cfg.get_value("user", "name", "")))
 	if saved != "":
@@ -227,51 +231,94 @@ func _build_ui() -> void:
 	file_dialog.file_selected.connect(_attach_file)
 	add_child(file_dialog)
 
+	confirm_dialog = ConfirmationDialog.new()
+	add_child(confirm_dialog)
+
 	_build_viewer()
 	_build_name_prompt()
 
 
 func _build_toolbar() -> void:
-	var bar := HBoxContainer.new()
-	bar.z_index = 20
-	bar.add_theme_constant_override("separation", 6)
-	tavern.add_child(bar)
-	bar.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-	bar.grow_horizontal = Control.GROW_DIRECTION_BEGIN
-	bar.offset_left = -12
-	bar.offset_right = -12
-	bar.offset_top = 6
-	# Same margins in every state so the buttons never change size on hover.
+	# One menu instead of a row of buttons, so new actions don't crowd the scene.
+	var menu_btn := MenuButton.new()
+	menu_btn.text = "Menu"
+	menu_btn.tooltip_text = "Name, conversation and view options"
+	menu_btn.focus_mode = Control.FOCUS_NONE
+	menu_btn.flat = false
+	menu_btn.z_index = 20
+	menu_btn.add_theme_font_size_override("font_size", 13)
+	# Same margins in every state so the button never changes size on hover.
 	var states := {
 		"normal": _box(Color(0.1, 0.06, 0.04, 0.75), EDGE, 6, 6),
 		"hover": _box(Color(0.22, 0.14, 0.09, 0.9), GOLD.darkened(0.4), 6, 6),
 		"pressed": _box(Color(0.06, 0.04, 0.03, 0.9), GOLD.darkened(0.4), 6, 6),
 		"hover_pressed": _box(Color(0.06, 0.04, 0.03, 0.9), GOLD.darkened(0.4), 6, 6),
-		"disabled": _box(Color(0.1, 0.06, 0.04, 0.5), EDGE, 6, 6),
 		"focus": StyleBoxEmpty.new(),
 	}
-	for box in states.values():
-		box.content_margin_top = 2
-		box.content_margin_bottom = 2
-	var specs := [
-		["A-", "Smaller text  (Cmd -)", func() -> void: _set_text_scale(text_scale - 0.1)],
-		["A+", "Larger text  (Cmd +)", func() -> void: _set_text_scale(text_scale + 0.1)],
-		["Full screen", "Toggle full screen  (Ctrl Cmd F or F11)", _toggle_fullscreen],
-	]
-	for spec in specs:
-		var b := Button.new()
-		b.text = spec[0]
-		b.tooltip_text = spec[1]
-		b.focus_mode = Control.FOCUS_NONE
-		b.add_theme_font_size_override("font_size", 13)
-		for state in states:
-			b.add_theme_stylebox_override(state, states[state])
-		for col in ["font_color", "font_hover_color", "font_pressed_color", "font_hover_pressed_color", "font_focus_color"]:
-			b.add_theme_color_override(col, GOLD if col.contains("hover") else TEXT)
-		b.pressed.connect(spec[2])
-		bar.add_child(b)
-		if spec[0] == "Full screen":
-			fullscreen_btn = b
+	for state in states:
+		states[state].content_margin_top = 2
+		states[state].content_margin_bottom = 2
+		menu_btn.add_theme_stylebox_override(state, states[state])
+	for col in ["font_color", "font_hover_color", "font_pressed_color", "font_hover_pressed_color", "font_focus_color"]:
+		menu_btn.add_theme_color_override(col, GOLD if col.contains("hover") or col.contains("pressed") else TEXT)
+	tavern.add_child(menu_btn)
+	menu_btn.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	menu_btn.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	menu_btn.offset_left = -12
+	menu_btn.offset_right = -12
+	menu_btn.offset_top = 6
+
+	menu = menu_btn.get_popup()
+	menu.add_theme_stylebox_override("panel", _box(Color("2a1e15"), GOLD.darkened(0.45), 8, 6))
+	menu.add_theme_stylebox_override("hover", _box(Color("4a3020"), Color.TRANSPARENT, 4, 4))
+	menu.add_theme_color_override("font_color", TEXT)
+	menu.add_theme_color_override("font_hover_color", GOLD)
+	menu.add_theme_color_override("font_accelerator_color", DIM)
+	menu.add_theme_color_override("font_separator_color", DIM)
+	menu.add_theme_font_size_override("font_size", 14)
+	menu.add_theme_constant_override("v_separation", 8)
+	menu.add_item("Change my name...", MenuItem.RENAME)
+	menu.add_separator()
+	menu.add_item("New conversation", MenuItem.NEW_CONVERSATION)
+	menu.set_item_tooltip(-1, "Clear the chat; everyone stays at the table")
+	menu.add_item("Clear the room", MenuItem.CLEAR_ROOM)
+	menu.set_item_tooltip(-1, "Clear the chat and send everyone else home")
+	menu.add_separator()
+	menu.add_item("Smaller text", MenuItem.SMALLER)
+	menu.set_item_accelerator(-1, KEY_MASK_CMD_OR_CTRL | KEY_MINUS)
+	menu.add_item("Larger text", MenuItem.LARGER)
+	menu.set_item_accelerator(-1, KEY_MASK_CMD_OR_CTRL | KEY_EQUAL)
+	menu.add_item("Full screen", MenuItem.FULL_SCREEN)
+	menu.set_item_accelerator(-1, KEY_F11)
+	menu.id_pressed.connect(_on_menu)
+
+
+func _on_menu(id: int) -> void:
+	match id:
+		MenuItem.RENAME:
+			_ask_name("")
+		MenuItem.NEW_CONVERSATION:
+			_confirm("New conversation", "Clear the chat? Everyone stays at the table.", "Clear chat",
+				func() -> void: _clear_conversation(false))
+		MenuItem.CLEAR_ROOM:
+			_confirm("Clear the room", "Clear the chat and send everyone else home? Agents won't rejoin until they're asked to.", "Clear room",
+				func() -> void: _clear_conversation(true))
+		MenuItem.SMALLER:
+			_set_text_scale(text_scale - 0.1)
+		MenuItem.LARGER:
+			_set_text_scale(text_scale + 0.1)
+		MenuItem.FULL_SCREEN:
+			_toggle_fullscreen()
+
+
+func _confirm(title: String, text: String, ok: String, action: Callable) -> void:
+	for c in confirm_dialog.confirmed.get_connections():
+		confirm_dialog.confirmed.disconnect(c["callable"])
+	confirm_dialog.title = title
+	confirm_dialog.dialog_text = text
+	confirm_dialog.ok_button_text = ok
+	confirm_dialog.confirmed.connect(action, CONNECT_ONE_SHOT)
+	confirm_dialog.popup_centered()
 
 
 # ------------------------------------------------------------------ window & text size
@@ -331,7 +378,7 @@ func _track_window() -> void:
 	if now < _window_check_at:
 		return
 	_window_check_at = now + 1.0
-	fullscreen_btn.text = "Exit full screen" if _is_fullscreen() else "Full screen"
+	menu.set_item_text(menu.get_item_index(MenuItem.FULL_SCREEN), "Exit full screen" if _is_fullscreen() else "Full screen")
 	var state := _describe_window()
 	if state == _window_state:
 		return
@@ -461,7 +508,7 @@ func _ask_name(error: String) -> void:
 	name_error.text = error
 	name_error.visible = error != ""
 	if name_edit.text == "":
-		name_edit.text = String(cfg.get_value("user", "name", OS.get_environment("USER").capitalize().replace(" ", "")))
+		name_edit.text = hub.my_name if hub and hub.my_name != "" else String(cfg.get_value("user", "name", OS.get_environment("USER").capitalize().replace(" ", "")))
 	name_edit.grab_focus()
 	name_edit.select_all()
 
@@ -471,10 +518,18 @@ func _submit_name() -> void:
 	if not RegEx.create_from_string("^[A-Za-z0-9_.\\-]{1,32}$").search(n):
 		_ask_name("Use 1-32 letters, digits, _ . or -")
 		return
-	name_layer.visible = false
+	if hub.token != "":
+		var res := await hub.rename(n)
+		if not res["ok"]:
+			_ask_name(String(res.get("error", "couldn't rename")))
+			return
+		name_layer.visible = false
+		status_label.text = "Seated as %s" % hub.my_name
+	else:
+		name_layer.visible = false
+		_join(n)
 	cfg.set_value("user", "name", n)
 	cfg.save(CFG_PATH)
-	_join(n)
 
 
 func _join(n: String) -> void:
@@ -526,6 +581,17 @@ func _on_message(m: Dictionary) -> void:
 	if m.get("kind") == "chat" and (hub.my_name in mentions or "all" in mentions):
 		if not get_window().has_focus():
 			DisplayServer.window_request_attention()
+
+
+func _clear_conversation(everyone: bool) -> void:
+	var res := await hub.clear_conversation(everyone)
+	if not res["ok"]:
+		_flash("Couldn't clear: %s" % res.get("error", "unknown error"))
+
+
+func _on_cleared() -> void:
+	messages.clear()
+	log_dirty = true
 
 
 func _on_member(m: Dictionary) -> void:
@@ -606,6 +672,8 @@ func _append(m: Dictionary) -> void:
 				line = "%s pulls up a chair" % who
 			"leave":
 				line = "%s heads out into the night" % who
+			"clear":
+				line = ("%s clears the room" if String(m.get("text", "")).ends_with("room") else "%s wipes the table clean") % who
 			_:
 				line = _esc(String(m.get("text", ""))).replace(" claimed ", " takes the key to ").replace(" released ", " hands back the key to ")
 		log_view.append_text("[center][color=#7d6d57][i]~ %s ~[/i][/color][/center]\n" % line)
@@ -713,8 +781,11 @@ func _on_input_key(e: InputEvent) -> void:
 
 
 func _unhandled_input(e: InputEvent) -> void:
-	if e is InputEventKey and e.pressed and e.keycode == KEY_ESCAPE and viewer.visible:
-		viewer.visible = false
+	if e is InputEventKey and e.pressed and e.keycode == KEY_ESCAPE:
+		if viewer.visible:
+			viewer.visible = false
+		elif name_layer.visible and hub.token != "":
+			name_layer.visible = false
 
 
 func _pick_file() -> void:

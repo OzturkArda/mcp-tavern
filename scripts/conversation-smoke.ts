@@ -42,8 +42,7 @@ try {
   const human = await post("/api/join", { name: "Human", kind: "human", client: "test-ui" });
   await Bun.sleep(80);
   const first = await prompt("A room-wide question", human.token);
-  check("room-wide prompt selects one neutral responder", first.floor.length === 1 && first.floor[0] === "Alpha");
-  check("non-owner cannot mark or pass a turn", !!(await call(b, "update_turn", { message_id: first.id, state: "passed" })).isError);
+  check("room-wide prompt invites every agent", first.floor.join() === "Alpha,Beta");
   const readA = textOf(await call(a, "read_messages"));
   check("selected responder sees explicit turn hint", readA.includes("[your turn to reply]"));
   let c = (await get("/api/conversation")).conversation;
@@ -57,26 +56,34 @@ try {
     if ((await call(a, "update_turn", { message_id: first.id, state: "working" })).isError) renewed = false;
   }
   c = (await get("/api/conversation")).conversation;
-  check("working heartbeats prevent premature fallback", renewed && c.deadline > originalDeadline && c.floor.join() === "Alpha");
+  check("working heartbeats prevent premature fallback", renewed && c.deadline > originalDeadline && c.floor.includes("Alpha"));
 
   await call(a, "send_message", { text: "First answer" });
   c = (await get("/api/conversation")).conversation;
-  check("answer completes the assigned turn", c.status === "complete" && c.replied.includes("Alpha") && c.floor.length === 0);
+  check("one answer leaves the other agent's turn open", c.status === "waiting" && c.replied.includes("Alpha") && c.floor.join() === "Beta");
+  await call(b, "send_message", { text: "Second answer" });
+  c = (await get("/api/conversation")).conversation;
+  check("room-wide prompt completes when every agent has answered", c.status === "complete" && c.floor.length === 0 && c.replied.join() === "Alpha,Beta");
 
   const second = await prompt("Another room-wide question", human.token);
-  check("next room-wide lead rotates", second.floor.join() === "Beta");
-  await call(a, "read_messages");
-  const handoffWait = call(a, "wait_for_messages", { timeout_seconds: 3 });
+  check("every room-wide prompt invites every agent", second.floor.join() === "Alpha,Beta");
   await call(b, "update_turn", { message_id: second.id, state: "passed" });
-  const handoffRead = textOf(await handoffWait);
+  await call(a, "send_message", { text: "Alpha answers alone" });
   c = (await get("/api/conversation")).conversation;
-  check("pass hands off and wakes the next responder", c.floor.join() === "Alpha" && handoffRead.includes("previous responder passed") && handoffRead.includes("[your turn to reply]"));
+  check("a pass doesn't block the others", c.status === "complete" && c.passed.includes("Beta") && c.replied.includes("Alpha"));
   check("superseded prompt cannot be updated", !!(await call(a, "update_turn", { message_id: first.id, state: "working" })).isError);
-  await call(a, "send_message", { text: "Taking the passed turn" });
+
+  await prompt("Room-wide question three", human.token);
+  await call(a, "send_message", { text: "Alpha is quick" });
+  const fourth = await prompt("And a new topic", human.token);
+  check("an unaddressed prompt starts a new round for everyone", fourth.replyTo === undefined && fourth.floor.join() === "Alpha,Beta" && (await get("/api/conversation")).conversation.messageId === fourth.id);
+  await call(a, "send_message", { text: "Alpha on the new topic" });
+  await call(b, "send_message", { text: "Beta on the new topic" });
 
   await call(b, "read_messages");
   const directed = await prompt("@Alpha please answer this one", human.token);
   check("directed prompt selects the named agent", directed.floor.join() === "Alpha");
+  check("non-owner cannot mark or pass a turn", !!(await call(b, "update_turn", { message_id: directed.id, state: "passed" })).isError);
   let betaWoke = false;
   const quiet = call(b, "wait_for_messages", { timeout_seconds: 1 }).then(r => { betaWoke = true; return r; });
   await Bun.sleep(180);
@@ -106,16 +113,12 @@ try {
   check("@all completes after both reply", (await get("/api/conversation")).conversation.status === "complete");
 
   const timeout = await prompt("A timeout question", human.token);
-  const original = timeout.floor[0];
-  check("directed and @all prompts preserve room-wide rotation", original === "Beta");
   for (let i = 0; i < 65; i++) {
     c = (await get("/api/conversation")).conversation;
-    if (c.floor[0] !== original) break;
+    if (c.status !== "waiting") break;
     await Bun.sleep(50);
   }
-  check("silent rotating lead hands off once", c.messageId === timeout.id && c.floor.length === 1 && c.floor[0] !== original && c.passed.includes(original));
-  const newOwner = c.floor[0] === "Alpha" ? a : b;
-  await call(newOwner, "send_message", { text: "Fallback answer" });
+  check("silent agents time out together", c.messageId === timeout.id && c.status === "unanswered" && c.passed.join() === "Alpha,Beta");
 
   const fixed = await prompt("@Alpha directed timeout", human.token);
   for (let i = 0; i < 65; i++) {
@@ -133,7 +136,7 @@ try {
   check("departure clears its pending turn", c.messageId === leaving.id && !c.floor.includes("Alpha") && c.passed.includes("Alpha"));
 
   const lone = await prompt("Only Beta remains", human.token);
-  check("rotation skips departed agents", lone.floor.join() === "Beta");
+  check("room-wide prompt skips departed agents", lone.floor.join() === "Beta");
   await call(b, "send_message", { text: "Lone answer" });
   await b.close();
   await Bun.sleep(150);

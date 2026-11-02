@@ -3,7 +3,7 @@
 // the hub HTTP API, on an isolated port and data dir.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { z } from "zod";
@@ -159,6 +159,25 @@ for (let i = 0; i < 230; i++) {
 const bulk = textOf(await b.callTool({ name: "read_messages", arguments: {} }));
 check("backlog over 200 messages isn't skipped", bulk.includes(": bulk 0\n") && bulk.includes(": bulk 229"), bulk.slice(0, 200));
 
+// A person can change their name; nobody can take a name already in use.
+const post = (path: string, body: unknown) => fetch(`${HUB}${path}`, { method: "POST", headers: human, body: JSON.stringify(body) });
+const renamed = await post("/api/rename", { name: "Arda2" });
+check("human renames", renamed.ok && ((await renamed.json()) as any).member.name === "Arda2");
+const names = ((await (await fetch(`${HUB}/api/members`)).json()) as any).members.map((m: any) => m.name);
+check("roster shows the new name", names.includes("Arda2") && !names.includes("Arda"), JSON.stringify(names));
+check("rename onto a taken name is refused", (await post("/api/rename", { name: "Ada" })).status === 409);
+
+// Clearing starts a fresh log, keeps the old one, and agents' cursors keep working.
+const lastBefore = ((await (await fetch(`${HUB}/api/messages?after=999999999`)).json()) as any).latest;
+const cleared = await post("/api/clear", {});
+check("clear succeeds", cleared.ok, cleared.ok ? "" : await cleared.text());
+const fresh = ((await (await fetch(`${HUB}/api/messages?after=0`)).json()) as any).messages;
+check("history holds only the clear notice", fresh.length === 1 && fresh[0].event === "clear" && fresh[0].id > lastBefore, JSON.stringify(fresh.slice(0, 3)));
+check("old log archived", readdirSync(DATA).some((f) => /^messages-.+\.jsonl$/.test(f)), readdirSync(DATA).join(","));
+await b.callTool({ name: "read_messages", arguments: {} });
+await post("/api/messages", { text: "fresh start" });
+check("agents still read new messages after a clear", textOf(await b.callTool({ name: "read_messages", arguments: {} })).includes("fresh start"));
+
 // Presence: closing a bridge removes its member.
 await b.close();
 await Bun.sleep(1500);
@@ -167,11 +186,44 @@ check("closed session leaves the room", !members.members.some((m: any) => m.name
 const left = (await (await fetch(`${HUB}/api/claims`)).json()) as any;
 check("leaving releases the member's claims", left.claims.length === 0, JSON.stringify(left.claims));
 
+// Clearing the room sends every agent home, and they stay out until asked back.
+await a.callTool({ name: "claim", arguments: { resource: "git:demo" } });
+await a.callTool({ name: "read_messages", arguments: {} });
+const removedWait = a.callTool({ name: "wait_for_messages", arguments: { timeout_seconds: 10 } });
+await Bun.sleep(200);
+check("clear room succeeds", (await post("/api/clear", { everyone: true })).ok);
+check("a waiting agent is told it was sent home", textOf(await removedWait).includes("cleared the room"));
+await Bun.sleep(2500);
+const afterRoom = ((await (await fetch(`${HUB}/api/members`)).json()) as any).members.map((m: any) => m.name);
+check("only the person who cleared the room remains", afterRoom.join() === "Arda2", JSON.stringify(afterRoom));
+check("clearing the room drops every claim", ((await (await fetch(`${HUB}/api/claims`)).json()) as any).claims.length === 0);
+const refused = await a.callTool({ name: "read_messages", arguments: {} });
+check("a removed agent's tools explain why", !!refused.isError && textOf(refused).includes("cleared the room"), textOf(refused));
+check("Claude session is told it was sent home", pushed.some((p) => p.meta.event === "removed"));
+check("a removed agent can be invited back", textOf(await a.callTool({ name: "join_room", arguments: { name: "Ada" } })).startsWith("Joined as Ada"));
+
+function stopHub() {
+  if (process.platform === "win32") {
+    Bun.spawnSync(["powershell", "-NoProfile", "-Command",
+      `Get-NetTCPConnection -LocalPort ${PORT} -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }`]);
+  } else {
+    Bun.spawnSync(["pkill", "-f", `${DATA}`]);
+    const pid = Bun.spawnSync(["lsof", "-ti", `tcp:${PORT}`, "-sTCP:LISTEN"]).stdout.toString().trim();
+    if (pid) Bun.spawnSync(["kill", ...pid.split("\n")]);
+  }
+}
+const hubUp = () => fetch(`${HUB}/api/health`).then((r) => r.ok, () => false);
+
+// Shutting the hub down closes the tavern: agents give up their seats and don't reopen it.
+stopHub();
+await Bun.sleep(13_000);
+check("a joined agent doesn't restart a stopped hub", !(await hubUp()));
+const closed = await a.callTool({ name: "read_messages", arguments: {} });
+check("the agent is told the tavern was closed", !!closed.isError && textOf(closed).includes("tavern was closed"), textOf(closed));
+check("join_room opens the tavern again", textOf(await a.callTool({ name: "join_room", arguments: { name: "Ada" } })).startsWith("Joined as Ada") && (await hubUp()));
+
 await a.close();
-// Stop the hub this test started.
-Bun.spawnSync(["pkill", "-f", `${DATA}`]);
-const pid = Bun.spawnSync(["lsof", "-ti", `tcp:${PORT}`, "-sTCP:LISTEN"]).stdout.toString().trim();
-if (pid) Bun.spawnSync(["kill", ...pid.split("\n")]);
+stopHub();
 rmSync(DATA, { recursive: true, force: true });
 console.log(failures ? `\n${failures} failure(s)` : "\nall passed");
 process.exit(failures ? 1 : 0);

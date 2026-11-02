@@ -8,8 +8,8 @@ The theme is visual only. Agents see a plain work chat through an MCP server and
 
 ## Features
 
-- **One room for every harness.** The chat is a plain stdio MCP server, so any MCP client can take part. Claude Code can also have messages pushed straight into the session.
-- **Fair turns.** The hub decides which agent answers a human prompt, rotating the lead so no single agent dominates. `@Name` and `@all` address agents directly.
+- **One room for every harness.** The chat is a plain stdio MCP server, so any MCP client can take part. Optional Claude Code and Codex adapters deliver messages into their sessions without a waiting loop.
+- **Everyone answers at once.** A human prompt goes to every agent at the table, and they reply side by side. `@Name` narrows it to the agents you name.
 - **Images both ways.** Paste, drop or attach screenshots in the client; agents send images from a file path and receive them as inline image content.
 - **Coordination built in.** Agents claim shared resources (a repo, a file, a deploy) before touching them, and the room shows who holds what.
 - **A living table.** Each member gets one of 12 character classes with a place card showing their tool (Claude, Codex or human), a status line, a thinking bubble while they work, and a doze when they've been idle.
@@ -59,6 +59,25 @@ args = ["/path/to/mcp-tavern/bridge/bridge.ts"]
 tool_timeout_sec = 3600
 ```
 
+For push delivery, add this to the same server configuration:
+
+```toml
+[mcp_servers.teamchat.env]
+TAVERN_CHANNELS = "codex"
+# Optional when codex is not on the bridge process's PATH:
+# TAVERN_CODEX_BIN = "C:/path/to/codex.exe"
+```
+
+The adapter uses the supported [`codex queue`](https://learn.chatgpt.com/docs/developer-commands#codex-queue) command to deliver addressed messages to one existing chat. It uses `CODEX_THREAD_ID` when the host provides it. Otherwise, pass your current chat UUID as `thread_id` when calling `join_room`; `TAVERN_CODEX_THREAD_ID` is also available for a bridge dedicated to a single chat. Avoid setting one fixed UUID in a global configuration shared by different chats.
+
+Restart the MCP connection after changing its configuration. When `join_room` reports that Codex push is configured, reply with `send_message` and finish the turn. Queued messages then run through Codex; do not also loop on `wait_for_messages`. Other tools, including image viewing, remain available. Completed turns can be woken while the host and bridge are running; this adapter does not run after Codex or its MCP connection exits.
+
+The target chat must be reachable by the installed Codex CLI. The adapter explicitly connects to the existing host's default `unix://` control socket, so it cannot silently start a separate daemon. For a shared app server, set `TAVERN_CODEX_REMOTE` to its `unix://`, local `ws://`, or secure `wss://` endpoint. Authenticated remote servers can use `TAVERN_CODEX_REMOTE_AUTH_TOKEN_ENV` to name the environment variable containing their bearer token. The adapter does not create a new chat or override the chat's model and permissions.
+
+If a host does not expose its chat to `codex queue` (including some desktop setups), push delivery needs a supported app-server connection first. A missing binding or failed command is reported in tool results; command failures also appear on the member's tavern status. Pending messages remain readable with `read_messages` / `wait_for_messages`. To retry push after repairing the connection, leave and rejoin. Queue acceptance is the delivery confirmation; the adapter does not automatically retry ambiguous failures and risk duplicate replies.
+
+To avoid repeated tool approval prompts for normal tavern use, Codex supports a server-specific `default_tools_approval_mode = "approve"` under `[mcp_servers.teamchat]`. That is separate from the delivery adapter and does not alter permissions for other servers.
+
 ### Any other MCP client
 
 Add a stdio server that runs `bun /path/to/mcp-tavern/bridge/bridge.ts`. Set the client's tool timeout to at least as long as the agent's `wait_for_messages` calls (30 minutes by default, up to an hour).
@@ -99,16 +118,16 @@ flowchart LR
 | `client/` | Godot 4.7 app: the tavern scene on top, the chat panel below. |
 | `scripts/` | End-to-end tests and the demo. |
 
-Nothing needs starting by hand. The client or the first agent to join starts the hub if it isn't running, and the hub keeps running after they close.
+Nothing needs starting by hand. The client or the first agent to join starts the hub if it isn't running, and the hub keeps running after they close. Shutting the hub down closes the tavern: agents give up their seats after about 10 seconds and only `join_room` opens it again.
 
-### Fair conversation turns
+### Conversation turns
 
 The hub assigns each human prompt to a `floor`, a list of agents who should answer:
 
-- A room-wide prompt goes to one lead, rotating among the agents present.
+- A room-wide prompt goes to every agent present, and they answer at the same time.
 - `@Name` selects that agent; several mentions select several agents.
 - `@all` invites everyone. Follow-ups without a mention while that round is open go to the agents who haven't answered yet.
-- If a room-wide lead passes, leaves or times out, the hub hands the prompt to another available agent. Each agent is tried at most once per prompt; directed requests stay directed.
+- If nobody was available for a room-wide prompt, the next agent to join takes it up. Directed requests stay directed.
 
 Agents mark a turn as working or pass with `update_turn`, and a reply completes it. The default reply timeout is 30 seconds (`TAVERN_REPLY_TIMEOUT_MS`), and each working update renews it. While a turn is open, the tavern shows who is thinking, who is working and who passed.
 
@@ -127,7 +146,11 @@ Before an agent changes something others might also touch, it claims it, for exa
 | `TAVERN_PORT` | `4777` | hub, bridge, demo | Hub port |
 | `TAVERN_DATA` | `~/.mcp-tavern` | hub, bridge | Where messages, images and looks are stored |
 | `TAVERN_AUTOJOIN` | | bridge | Join the room under this name on startup |
-| `TAVERN_CHANNELS` | | bridge | `claude` turns on Claude Code channel pushes |
+| `TAVERN_CHANNELS` | | bridge | `claude` enables Claude channels; `codex` enables session-bound Codex queue delivery |
+| `TAVERN_CODEX_THREAD_ID` | inherited `CODEX_THREAD_ID` | bridge | Existing chat UUID for the optional `codex` adapter; `join_room.thread_id` takes precedence |
+| `TAVERN_CODEX_BIN` | `codex` | bridge | Codex CLI executable; use a native `.exe` path on Windows when necessary |
+| `TAVERN_CODEX_REMOTE` | `unix://` | bridge | Existing app-server endpoint for `codex queue` |
+| `TAVERN_CODEX_REMOTE_AUTH_TOKEN_ENV` | | bridge | Name of the environment variable holding a remote host's bearer token |
 | `TAVERN_MAX_AGENT_STREAK` | `6` | bridge | Agent-only messages before @mentions stop waking agents |
 | `TAVERN_REPLY_TIMEOUT_MS` | `30000` | hub | How long an assigned agent has to answer or mark itself working |
 
@@ -137,6 +160,7 @@ Client flags go after `--`, for example `godot --path client -- --name=Ada`: `--
 
 ```bash
 bun run test     # end-to-end: bridges and a human on an isolated port
+bun run test:codex # Codex adapter with a fake queue command; no model calls
 bun run demo     # seats five pretend agents and plays a short conversation
 bun run hub      # run the hub in the foreground
 ```

@@ -12,6 +12,8 @@ signal join_failed(reason: String)
 signal token_changed(token: String)
 ## The hub's current turn state (Dictionary) or null when nothing is pending.
 signal conversation_changed(conversation: Variant)
+## Someone started a fresh conversation; drop the log.
+signal cleared
 
 var base_url := "http://127.0.0.1:4777"
 var token := ""
@@ -51,6 +53,9 @@ func join(member_name: String, resume_token: String = "") -> void:
 			await get_tree().create_timer(0.5).timeout
 			continue
 		_joining = false
+		if int(res["status"]) == 410:
+			token = ""
+			token_changed.emit("")
 		join_failed.emit(String(res.get("error", "could not join")))
 		return
 	_joining = false
@@ -130,6 +135,15 @@ func _handle(ev: Dictionary) -> void:
 			claims_changed.emit(ev.get("claims", []))
 		"conversation":
 			conversation_changed.emit(ev.get("conversation"))
+		"cleared":
+			cleared.emit()
+		"removed":
+			# Someone cleared the room: stay out until the user picks a seat again.
+			token = ""
+			token_changed.emit("")
+			_ws.close()
+			_online = false
+			join_failed.emit(String(ev.get("reason", "You were sent home.")))
 
 
 func send_message(text: String, image_file: String = "") -> Dictionary:
@@ -146,6 +160,19 @@ func upload_image(bytes: PackedByteArray) -> Dictionary:
 
 func set_look(member_name: String, look: String) -> void:
 	await request(HTTPClient.METHOD_POST, "/api/look", {"name": member_name, "look": look})
+
+
+func rename(new_name: String) -> Dictionary:
+	var res := await request(HTTPClient.METHOD_POST, "/api/rename", {"name": new_name})
+	if res["ok"]:
+		me = res["member"]
+		my_name = String(me["name"])
+	return res
+
+
+## With `everyone`, the rest of the room is sent home too.
+func clear_conversation(everyone: bool) -> Dictionary:
+	return await request(HTTPClient.METHOD_POST, "/api/clear", {"everyone": everyone})
 
 
 func request(method: int, path: String, body = null, raw: PackedByteArray = PackedByteArray()) -> Dictionary:
